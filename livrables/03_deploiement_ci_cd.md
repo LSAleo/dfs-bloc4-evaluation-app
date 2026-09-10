@@ -10,38 +10,46 @@
 
 ### 1.1 Vue d'ensemble
 
-Le code source est heberge sur GitHub : **GitHub Actions** est retenu comme orchestrateur (aucun serveur CI a administrer). Le flux promeut le code **qualification -> production** en trois etapes strictement ordonnees :
+Le code source est heberge sur GitHub : **GitHub Actions** est retenu comme orchestrateur (aucun serveur CI a administrer). Le flux promeut le code **qualification -> production** en quatre etapes strictement ordonnees, chacune bloquant la suivante :
 
-1. **Controle qualite** sur un runner ephemere (tests bloquants) : rien ne part en production si les tests echouent.
-2. **Deploiement** sur la machine de production via **SSH**, en executant un script idempotent (`update-prod.sh`).
-3. **Smoke test** post-deploiement independant, verifiant les points d'entree publics.
+1. **Controle qualite** sur un runner ephemere (tests bloquants) : rien ne part vers un environnement si les tests echouent.
+2. **Deploiement sur la QUALIFICATION** via SSH : la reference est installee et verifiee sur `eval-dfs-q-tpl-20265-07.it-students.fr`.
+3. **Deploiement en PRODUCTION** via SSH, **uniquement si la qualification a valide la meme reference**.
+4. **Smoke test** post-deploiement independant, contre le domaine public de production.
+
+**La production n'est jamais la premiere cible** : c'est le palier 2 qui fait de ce dispositif une promotion inter-environnements et non un simple deploiement direct. Les deux paliers executent **le meme script** `update-prod.sh`, parametre par `DOMAIN` et `SCHEME` — la procedure appliquee a la production est donc, par construction, exactement celle qui a ete validee sur la qualification. La qualification n'ayant pas de TLS, elle est appelee avec `SCHEME=http`.
 
 La branche `main` est la branche **de production** : tout ce qui y est fusionne est deployable. Le declenchement peut aussi etre manuel et cible (input `ref`).
 
 ### 1.2 Diagramme du pipeline
 
 ```mermaid
-flowchart LR
+flowchart TB
     Dev([Push sur main / declenchement manuel]) --> Q
 
-    subgraph GHA["GitHub Actions (runner ubuntu-latest)"]
-      Q["Job quality<br/>composer install<br/>Pint (informatif)<br/>php artisan test (bloquant)"]
-      D["Job deploy<br/>SSH -> update-prod.sh"]
-      S["Job smoke<br/>curl endpoints publics"]
+    Q["Job quality (runner ephemere)<br/>composer install<br/>Pint (informatif)<br/>php artisan test (BLOQUANT)"]
+    Q -- tests KO --> X[["Arret : aucun environnement touche"]]
+    Q -- tests OK --> DQ
+
+    subgraph P1["Palier 1 — QUALIFICATION (SSH)"]
+      DQ["job deploy-qualification<br/>DOMAIN=...-q-... SCHEME=http<br/>update-prod.sh REF"]
     end
 
-    Q -- tests OK --> D
-    Q -- tests KO --> X[["Arret : production intacte"]]
-    D --> PROD
+    DQ -- echec build ou smoke --> XQ[["Rollback qualification<br/>PRODUCTION INTACTE"]]
+    DQ -- qualification validee --> DP
 
-    subgraph PROD["Production (SSH)"]
-      U["update-prod.sh :<br/>git reset --hard origin/ref<br/>composer --no-dev + migrate<br/>build microservice + restart<br/>smoke interne + AUTO-ROLLBACK"]
+    subgraph P2["Palier 2 — PRODUCTION (SSH)"]
+      DP["job deploy<br/>meme script, defauts prod (https)<br/>update-prod.sh REF"]
     end
 
-    U --> S
+    DP -- echec build ou smoke --> XP[["Rollback production<br/>version precedente restauree"]]
+    DP --> S["Job smoke<br/>curl domaine public"]
+
     S -- OK --> OK([Deploiement valide])
-    S -- KO --> RB([Rollback vers version precedente])
+    S -- KO --> KO([Job en echec, notification GitHub])
 ```
+
+> Le meme `update-prod.sh` est joue aux deux paliers ; seules les variables `DOMAIN` et `SCHEME` changent. A chaque palier, un echec de **construction** comme de **smoke test** declenche le rollback de cet environnement et interrompt la chaine.
 
 ---
 
@@ -108,7 +116,20 @@ Etapes executees par `update-prod.sh` (sur la machine de production, appelees pa
 5. `php artisan config:clear` : rechargement de la configuration.
 6. Reconstruction du microservice Next.js (`npm install && npm run build`) et redemarrage (`systemctl restart`).
 7. `systemctl reload apache2`.
-8. Smoke test interne + **rollback automatique** si echec (cf. § 7).
+8. Smoke test interne (attente active) + **rollback automatique si la construction OU le smoke test echoue** (cf. § 7).
+
+Le meme script sert les deux paliers, la cible etant choisie par variables d'environnement :
+
+```bash
+# palier 1 — qualification (pas de TLS)
+DOMAIN=eval-dfs-q-tpl-20265-07.it-students.fr SCHEME=http \
+  bash /var/www/opstrack/deploy/update-prod.sh main
+
+# palier 2 — production (valeurs par defaut du script)
+bash /var/www/opstrack/deploy/update-prod.sh main
+```
+
+C'est ce qui garantit que la procedure appliquee a la production est **exactement** celle validee sur la qualification, et non une variante.
 
 ---
 
@@ -150,10 +171,14 @@ Verification externe des endpoints apres deploiement :
 
 | Situation | Comportement du dispositif |
 | --- | --- |
-| Echec du **controle qualite** (tests KO) | Le job `deploy` n'est pas execute : **la production reste intacte**. |
-| Echec du **smoke test** apres deploiement | `update-prod.sh` effectue un **rollback automatique** : `git reset --hard <PREV_SHA>`, reconstruction, redemarrage, puis nouveau smoke test. |
-| Echec du **rollback** | Le script sort en erreur explicite (`intervention manuelle requise`) ; le job GitHub Actions apparait **en echec** (notification GitHub). |
+| Echec du **controle qualite** (tests KO) | Aucun job de deploiement n'est execute : **les deux environnements restent intacts**. |
+| Echec sur la **qualification** (construction ou smoke test) | La qualification est restauree par rollback et le job sort en erreur : le palier production n'est **jamais atteint**. C'est le filet principal du dispositif. |
+| Echec de la **construction** en production (`composer`, `migrate`, `npm run build`, `systemctl`) | Chaque etape de `build_release` est gardee par `\|\| return 1` et l'appel est `build_release \|\| rollback "construction"` : le **rollback couvre donc aussi les echecs de construction**, pas seulement ceux du smoke test. |
+| Echec du **smoke test** apres deploiement | `update-prod.sh` effectue un **rollback automatique** : `git reset --hard <PREV_SHA>`, reconstruction, redemarrage, puis nouveau smoke test de verification. |
+| Echec du **rollback** lui-meme | Le script sort en erreur explicite (`intervention manuelle requise`) ; le job GitHub Actions apparait **en echec** (notification GitHub). |
 | Diagnostic | Logs du job Actions + `journalctl -u opstrack-dispatch-dashboard` + `storage/logs/laravel.log` (cf. livrable 04). |
+
+> **Note sur l'implementation du rollback.** `build_release` et `smoke_test` sont appelees en contexte conditionnel (`cmd || rollback`), or bash y **desactive `set -e`**. Sans garde explicite, l'echec de `composer install` n'aurait pas interrompu les etapes suivantes et le rollback n'aurait pas ete declenche. D'ou le `|| return 1` sur chacune des six etapes de construction.
 
 **Limite connue** : le rollback restaure le **code**, pas le **schema** (migrations `forward-only`). Recommandation : snapshot de la base avant `migrate` sur les deploiements a migration lourde, et migrations reversibles.
 
@@ -169,12 +194,25 @@ Verification externe des endpoints apres deploiement :
 
 ### Prerequis a configurer (une fois) dans GitHub
 
-Le run automatique necessite trois **secrets de depot** (Settings -> Secrets and variables -> Actions), non versionnes :
+Le run automatique necessite cinq **secrets de depot** (Settings -> Secrets and variables -> Actions), non versionnes :
 
-| Secret | Valeur |
-| --- | --- |
-| `PROD_HOST` | `eval-dfs-p-tpl-20265-07.it-students.fr` |
-| `PROD_USER` | `ubuntu` |
-| `SSH_PRIVATE_KEY` | contenu de la cle privee `ubuntu.pem` |
+| Secret | Valeur | Palier |
+| --- | --- | --- |
+| `QUALIF_HOST` | `eval-dfs-q-tpl-20265-07.it-students.fr` | qualification |
+| `QUALIF_USER` | `ubuntu` | qualification |
+| `PROD_HOST` | `eval-dfs-p-tpl-20265-07.it-students.fr` | production |
+| `PROD_USER` | `ubuntu` | production |
+| `SSH_PRIVATE_KEY` | contenu de la cle privee `ubuntu.pem` | les deux |
 
-En l'absence de ces secrets, le dispositif reste utilisable **manuellement** : `ssh … 'bash /var/www/opstrack/deploy/update-prod.sh main'`, comme demontre au § 6.2.
+Les deux jobs sont par ailleurs rattaches a des **environnements GitHub** (`qualification` et `production`), ce qui permet d'exiger une approbation manuelle avant la production si l'equipe le souhaite, sans modifier le workflow.
+
+En l'absence de ces secrets, le dispositif reste utilisable **manuellement** avec le meme script, comme demontre au § 6.2 :
+
+```bash
+ssh -i ubuntu.pem ubuntu@eval-dfs-q-tpl-20265-07.it-students.fr \
+  'DOMAIN=eval-dfs-q-tpl-20265-07.it-students.fr SCHEME=http bash /var/www/opstrack/deploy/update-prod.sh main'
+ssh -i ubuntu.pem ubuntu@eval-dfs-p-tpl-20265-07.it-students.fr \
+  'bash /var/www/opstrack/deploy/update-prod.sh main'
+```
+
+**Prerequis d'execution** : le script appelle `sudo systemctl` ; il repose donc sur le `sudo` sans mot de passe dont dispose l'utilisateur `ubuntu` sur les AMI Ubuntu AWS (`/etc/sudoers.d/90-cloud-init-users`). Sur un hote sans cette configuration, il faut ajouter une regle `NOPASSWD` limitee aux deux commandes `systemctl` utilisees.

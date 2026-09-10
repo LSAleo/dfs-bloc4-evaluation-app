@@ -3,7 +3,11 @@ name: CI/CD - Qualification vers Production
 # Deploiement automatise qualification -> production (C31)
 # - Declenchement explicite (workflow_dispatch) ou continu (push sur main)
 # - Controle qualite bloquant (tests) avant tout deploiement
-# - Mise a jour de la production par SSH (script idempotent + auto-rollback)
+# - PROMOTION EN DEUX PALIERS : la reference est d'abord deployee et verifiee sur
+#   la QUALIFICATION ; la production n'est jamais la premiere cible. Les deux
+#   paliers rejouent le meme script (update-prod.sh), parametre par DOMAIN et
+#   SCHEME, ce qui garantit une procedure identique d'un environnement a l'autre.
+# - Mise a jour par SSH (script idempotent + auto-rollback build ET smoke)
 # - Verification post-deploiement (smoke test) independante
 
 on:
@@ -51,10 +55,34 @@ jobs:
       - name: Tests automatises (bloquant)
         run: php artisan test
 
-  # 2) Deploiement en production (uniquement si quality reussit)
+  # 2) Palier 1 : promotion sur la QUALIFICATION.
+  #    La reference est deployee et verifiee sur l'environnement de
+  #    qualification avant toute action sur la production. Le script sort en
+  #    erreur (et rollback) si la construction ou le smoke test echoue, ce qui
+  #    fait echouer ce job et empeche mecaniquement le palier suivant.
+  #    La qualification n'a pas de TLS : SCHEME=http.
+  deploy-qualification:
+    name: Deploiement qualification
+    needs: quality
+    runs-on: ubuntu-latest
+    environment: qualification
+    steps:
+      - name: Mise a jour de la qualification par SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.QUALIF_HOST }}
+          username: ${{ secrets.QUALIF_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 15m
+          script: |
+            DOMAIN='${{ secrets.QUALIF_HOST }}' SCHEME=http \
+              bash /var/www/opstrack/deploy/update-prod.sh "${{ github.event.inputs.ref || 'main' }}"
+
+  # 3) Palier 2 : promotion en PRODUCTION, uniquement si la qualification a
+  #    valide la meme reference.
   deploy:
     name: Deploiement production
-    needs: quality
+    needs: deploy-qualification
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -67,7 +95,7 @@ jobs:
           command_timeout: 15m
           script: bash /var/www/opstrack/deploy/update-prod.sh "${{ github.event.inputs.ref || 'main' }}"
 
-  # 3) Verification post-deploiement independante
+  # 4) Verification post-deploiement independante, contre le domaine public.
   smoke:
     name: Smoke test post-deploiement
     needs: deploy
