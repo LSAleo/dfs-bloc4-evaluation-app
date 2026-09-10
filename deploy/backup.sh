@@ -23,7 +23,9 @@ MONGO_DB="$(env_get MONGODB_DATABASE)"
 mkdir -p "${DEST}"
 
 # 1. Base relationnelle (dump transactionnel coherent)
-mysqldump -u"${DB_USERNAME}" -p"${DB_PASSWORD}" --single-transaction --quick --routines \
+# --no-tablespaces : l'utilisateur applicatif est volontairement limite a sa base
+# (pas de privilege global PROCESS requis par le dump des tablespaces).
+mysqldump -u"${DB_USERNAME}" -p"${DB_PASSWORD}" --single-transaction --quick --no-tablespaces \
   "${DB_DATABASE}" | gzip > "${DEST}/mysql-${DB_DATABASE}.sql.gz"
 
 # 2. Base NoSQL (journaux techniques)
