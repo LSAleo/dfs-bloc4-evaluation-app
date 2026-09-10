@@ -3,7 +3,8 @@
 # provision-prod.sh — Mise en service reproductible d'OpsTrack sur une machine
 # Ubuntu 24.04 « nue » (Apache + PHP 8.4 + MySQL + MongoDB + Redis + Node).
 #
-# Idempotent : relançable sans casser un état déjà en place.
+# Idempotent : relançable sans casser un état déjà en place (migrations rejouées
+# sans effet, seed uniquement sur base vierge, secrets existants réutilisés).
 # Les secrets (mot de passe BDD, token API, secret webhook) sont GENERES sur la
 # machine et écrits uniquement dans .env (chmod 640). Ils ne sont jamais affichés
 # ni committés.
@@ -11,6 +12,7 @@
 # Usage :
 #   sudo DOMAIN=eval-dfs-p-tpl-20265-07.it-students.fr \
 #        REPO=https://github.com/LSAleo/dfs-bloc4-evaluation-app.git \
+#        MYSQL_ROOT_PWD='<mot de passe root MySQL>' \
 #        bash provision-prod.sh
 #
 set -euo pipefail
@@ -21,7 +23,9 @@ BRANCH="${BRANCH:-main}"
 APP_DIR="${APP_DIR:-/var/www/opstrack}"
 DB_NAME="${DB_NAME:-opstrack}"
 DB_USER="${DB_USER:-opstrack}"
-MYSQL_ROOT_PWD="${MYSQL_ROOT_PWD:-0000}"   # a durcir hors epreuve
+# Pas de valeur par defaut : un mot de passe, meme faible, n'a rien a faire en
+# dur dans un depot. Doit etre fourni explicitement a l'appel.
+MYSQL_ROOT_PWD="${MYSQL_ROOT_PWD:?fournir MYSQL_ROOT_PWD (ex: sudo MYSQL_ROOT_PWD=... bash provision-prod.sh)}"
 
 echo "==> [1/9] Paquets systeme"
 export DEBIAN_FRONTEND=noninteractive
@@ -54,16 +58,31 @@ echo "==> [4/9] Base de donnees + utilisateur applicatif (moindre privilege)"
 DB_PASS="$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 28)"
 mysql -uroot -p"${MYSQL_ROOT_PWD}" <<SQL
 CREATE DATABASE IF NOT EXISTS ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
-ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';
+-- On recree le compte applicatif pour garantir que ses privileges sont
+-- exactement ceux listes ci-dessous (GRANT etant additif, un ancien GRANT ALL
+-- issu d'un passage precedent survivrait). DROP USER ne touche pas aux donnees.
+DROP USER IF EXISTS '${DB_USER}'@'localhost';
+CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+-- Moindre privilege effectif : strictement ce dont Laravel a besoin pour le DML
+-- et pour jouer ses migrations. Exclut notamment GRANT OPTION, FILE, PROCESS,
+-- CREATE USER, TRIGGER, EXECUTE et CREATE ROUTINE.
+GRANT SELECT, INSERT, UPDATE, DELETE,
+      CREATE, ALTER, DROP, INDEX, REFERENCES, LOCK TABLES
+  ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 SQL
 
 echo "==> [5/9] Fichier .env de production"
 if [ ! -f .env ]; then cp .env.example .env; fi
-API_TOKEN="$(openssl rand -hex 32)"
-HOOK_PASS="$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 28)"
+# Idempotence : on REUTILISE les secrets deja presents dans .env. Les regenerer
+# a chaque passage desynchroniserait OPSTRACK_API_TOKEN de la ligne api_tokens
+# semee en base (-> 401 du microservice) et invaliderait le secret du webhook
+# deja communique a l'emetteur externe.
+read_env() { grep -oP "^$1=\K.*" .env 2>/dev/null | head -1; }
+API_TOKEN="$(read_env OPSTRACK_API_TOKEN)"
+case "${API_TOKEN}" in ''|change-me|opstrack-*) API_TOKEN="$(openssl rand -hex 32)";; esac
+HOOK_PASS="$(read_env WEBHOOK_BASIC_PASSWORD)"
+case "${HOOK_PASS}" in ''|password) HOOK_PASS="$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 28)";; esac
 set_env() { sed -i "s|^$1=.*|$1=$2|" .env; }
 set_env APP_ENV production
 set_env APP_DEBUG false
@@ -80,7 +99,19 @@ chown "$SUDO_USER":www-data .env && chmod 640 .env
 sudo -u "$SUDO_USER" php artisan key:generate --force
 
 echo "==> [6/9] Schema + donnees + droits"
-sudo -u "$SUDO_USER" php artisan migrate --force --seed
+# Les migrations sont rejouables telles quelles (table `migrations` = journal).
+# Le seed, NON : database/seeders/DatabaseSeeder.php enchaine des create() secs
+# (et non des firstOrCreate), donc un second passage violerait l'unicite de
+# users.email et ferait echouer le script sous `set -e`. On ne seme donc que sur
+# une base vierge, ce qui rend l'ensemble reellement relancable.
+sudo -u "$SUDO_USER" php artisan migrate --force
+USERS_COUNT="$(mysql -uroot -p"${MYSQL_ROOT_PWD}" -N -B \
+  -e "SELECT COUNT(*) FROM ${DB_NAME}.users" 2>/dev/null || echo 0)"
+if [ "${USERS_COUNT}" = "0" ]; then
+  sudo -u "$SUDO_USER" php artisan db:seed --force
+else
+  echo "    base deja peuplee (${USERS_COUNT} utilisateurs) -> seed ignore"
+fi
 chown -R "$SUDO_USER":www-data "${APP_DIR}"
 find storage bootstrap/cache -type d -exec chmod 2775 {} \;
 find storage bootstrap/cache -type f -exec chmod 664 {} \;
