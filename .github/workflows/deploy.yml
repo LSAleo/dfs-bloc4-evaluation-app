@@ -1,0 +1,83 @@
+name: CI/CD - Qualification vers Production
+
+# Deploiement automatise qualification -> production (C31)
+# - Declenchement explicite (workflow_dispatch) ou continu (push sur main)
+# - Controle qualite bloquant (tests) avant tout deploiement
+# - Mise a jour de la production par SSH (script idempotent + auto-rollback)
+# - Verification post-deploiement (smoke test) independante
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branche ou tag a deployer"
+        default: main
+  push:
+    branches: [main]
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  # 1) Controle qualite : rien ne part en prod si les tests echouent
+  quality:
+    name: Controle qualite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_sqlite, mysql, mongodb, redis, zip, bcmath, intl, curl
+          coverage: none
+
+      - name: Dependances Composer
+        run: composer install --no-interaction --prefer-dist --ignore-platform-req=ext-mongodb
+
+      - name: Preparation environnement de test
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: Style de code (Pint) - informatif
+        run: vendor/bin/pint --test
+        continue-on-error: true
+
+      - name: Tests automatises (bloquant)
+        run: php artisan test
+
+  # 2) Deploiement en production (uniquement si quality reussit)
+  deploy:
+    name: Deploiement production
+    needs: quality
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Mise a jour de la production par SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 15m
+          script: bash /var/www/opstrack/deploy/update-prod.sh "${{ github.event.inputs.ref || 'main' }}"
+
+  # 3) Verification post-deploiement independante
+  smoke:
+    name: Smoke test post-deploiement
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verification des endpoints publics
+        run: |
+          set -e
+          BASE="https://eval-dfs-p-tpl-20265-07.it-students.fr"
+          echo "health :"; curl -fsS "$BASE/api/health" | grep -q '"status":"ok"'
+          echo "home   :"; curl -fsS -o /dev/null "$BASE/"
+          echo "dash   :"; curl -fsS -o /dev/null "$BASE/dispatch-dashboard"
+          echo "Smoke test OK"
