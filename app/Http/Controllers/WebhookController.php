@@ -32,17 +32,36 @@ class WebhookController extends Controller
 
         $ticket = Ticket::query()->where('reference', $payload['ticket_reference'])->firstOrFail();
 
+        $externalEventId = $payload['external_event_id'] ?? null;
+
+        // Deduplication : un meme evenement externe (external_event_id) ne doit
+        // creer qu'une seule intervention. Les webhooks etant souvent rejoues,
+        // on renvoie l'intervention deja enregistree de maniere idempotente.
+        if ($externalEventId !== null) {
+            $existing = Intervention::query()
+                ->where('external_event_id', $externalEventId)
+                ->first();
+
+            if ($existing !== null) {
+                return response()->json([
+                    'message' => 'Webhook already processed.',
+                    'intervention_id' => $existing->id,
+                ]);
+            }
+        }
+
         $intervention = Intervention::query()->create([
             'ticket_id' => $ticket->id,
             'scheduled_for' => now()->addHour(),
             'status' => $payload['status'],
             'summary' => $payload['summary'] ?? 'Webhook update received.',
-            'external_event_id' => $payload['external_event_id'] ?? null,
+            'external_event_id' => $externalEventId,
         ]);
 
-        // Intentional defect for the assessment: webhook processing acknowledges
-        // the external status but leaves the ticket in a scheduled state.
-        $ticket->update(['status' => 'scheduled']);
+        // Le ticket reflete le statut reellement transmis par le webhook,
+        // au lieu d'etre force sur 'scheduled' (suppression de l'ecart
+        // entre l'evenement externe et l'etat en base).
+        $ticket->update(['status' => $payload['status']]);
 
         $this->eventLogService->record('webhook', 'intervention.synced', [
             'ticket_id' => $ticket->id,

@@ -15,5 +15,6 @@ export async function fetchTickets() {
   }
 
   const payload = await response.json();
-  return payload.items ?? [];
+  // L'API Laravel renvoie la collection sous la cle `data` (JsonResource).
+  return payload.data ?? [];
 }
