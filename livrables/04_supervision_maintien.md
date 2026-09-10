@@ -83,6 +83,7 @@ OK: certificat TLS valide 89 j
 | Element | Methode | Frequence | Retention |
 | --- | --- | --- | --- |
 | Base relationnelle MySQL `opstrack` | `mysqldump --single-transaction --quick --no-tablespaces` puis gzip | quotidienne | 7 jours |
+| | *identifiants passes par un `--defaults-extra-file` temporaire en `600` (supprime par `trap`) et non par `-p` en ligne de commande, un argument etant lisible de tous les comptes via `ps aux`* | | |
 | Base NoSQL MongoDB `opstrack_logs` | `mongodump --gzip --archive` | quotidienne | 7 jours |
 | Secrets / configuration (`.env`) | copie `chmod 600` | quotidienne | 7 jours |
 
@@ -144,6 +145,20 @@ $response = $app->make(WebhookController::class)->handle($request);
 ```
 
 Deux defauts fonctionnels du `WebhookController` ont ete corriges dans la foulee (cf. § 7) : **absence de deduplication** sur `external_event_id` et **forcage du ticket sur `scheduled`**.
+
+**Durcissement de l'entree du webhook.** Reporter le statut transmis sur le ticket (correctif ci-dessus) ouvrait une seconde faiblesse : `status` n'etait valide qu'en `string` libre, alors que la valeur est desormais recopiee dans `interventions.status` **et** `tickets.status`, deux colonnes `varchar(20)`. Un appelant authentifie pouvait donc :
+
+- ecrire un statut arbitraire, non prevu par le domaine — le KPI `openTickets` comptant tout statut hors `resolved`/`closed`, un ticket au statut inconnu resterait « ouvert » indefiniment ;
+- depasser 20 caracteres et declencher une erreur SQL `22001 Data too long`, donc une reponse `500` sur un point d'entree public — c'est le « comportement anormal sur entree mal formee » signale dans les indices de contexte.
+
+Correctifs appliques dans [`WebhookController.php`](../app/Http/Controllers/WebhookController.php) :
+
+| Mesure | Detail |
+| --- | --- |
+| Liste blanche de statuts | `Rule::in(['new','scheduled','in_progress','resolved','closed'])` — le vocabulaire effectivement utilise par le domaine (seeder, `DashboardController`) |
+| Bornes de longueur | `ticket_reference` `max:50`, `summary` `max:2000`, `external_event_id` `max:100` |
+| Validation explicite | `Validator::make(...)` + reponse `422` formulee par le controleur, au lieu de `$request->validate()` : ce point d'entree court-circuitant le kernel HTTP, la conversion de `ValidationException` en `422` n'y est pas garantie |
+| Reference inconnue | `first()` + reponse `404` explicite, au lieu de `firstOrFail()` dont la conversion en `404` depend du gestionnaire global absent de ce chemin |
 
 ### 5.5 Verification apres correction
 

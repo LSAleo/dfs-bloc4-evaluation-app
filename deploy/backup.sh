@@ -25,7 +25,16 @@ mkdir -p "${DEST}"
 # 1. Base relationnelle (dump transactionnel coherent)
 # --no-tablespaces : l'utilisateur applicatif est volontairement limite a sa base
 # (pas de privilege global PROCESS requis par le dump des tablespaces).
-mysqldump -u"${DB_USERNAME}" -p"${DB_PASSWORD}" --single-transaction --quick --no-tablespaces \
+#
+# Le mot de passe passe par un fichier temporaire en 600 et non par -p en ligne
+# de commande : un argument est visible de tous les comptes de la machine via
+# `ps aux`, ce qui divulguerait le secret de la base a chaque sauvegarde.
+MYSQL_CNF="$(mktemp)"
+chmod 600 "${MYSQL_CNF}"
+trap 'rm -f "${MYSQL_CNF}"' EXIT
+printf '[client]\nuser=%s\npassword=%s\n' "${DB_USERNAME}" "${DB_PASSWORD}" > "${MYSQL_CNF}"
+
+mysqldump --defaults-extra-file="${MYSQL_CNF}" --single-transaction --quick --no-tablespaces \
   "${DB_DATABASE}" | gzip > "${DEST}/mysql-${DB_DATABASE}.sql.gz"
 
 # 2. Base NoSQL (journaux techniques)
