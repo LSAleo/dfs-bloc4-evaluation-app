@@ -15,7 +15,9 @@ Ce dossier contient deux documents complementaires :
 php tools/generate-code-reference.php
 ```
 
-Le generateur analyse `app/`, `database/seeders/` et `database/factories/` avec le tokenizer de PHP (`token_get_all`), et **exclut les dependances tierces** (`vendor/`, `node_modules/`) conformement a l'attendu. Il extrait namespaces, classes/interfaces/traits/enums, methodes publiques avec signature, et docblocks. Sortie deterministe : deux executions successives produisent un fichier identique, ce qui le rend rejouable dans le pipeline CI. Perimetre couvert a ce jour : **22 fichiers, 22 classes, 31 methodes publiques** — total recoupe avec un comptage independant du code source.
+Le generateur analyse `app/`, `database/seeders/` et `database/factories/` avec le tokenizer de PHP (`token_get_all`), et **exclut les dependances tierces** (`vendor/`, `node_modules/`) conformement a l'attendu. Il extrait namespaces, classes/interfaces/traits/enums, methodes publiques avec signature, et docblocks. Sortie deterministe : deux executions successives produisent un fichier identique, ce qui le rend rejouable dans le pipeline CI.
+
+> **Le perimetre depend de l'arbre dans lequel le generateur est execute.** Chaque livrable etant rendu sur sa propre branche, la reference versionnee ici couvre le code present sur **cette** branche : **22 fichiers, 22 classes, 31 methodes publiques** (total recoupe avec un comptage independant du code source). Sur la branche integree, qui reunit les cinq livrables, une regeneration donne **23 classes et 34 methodes publiques** : la difference est la classe `App\Observers\TicketObserver` introduite par le livrable 04, mentionnee dans la vue d'ensemble ci-dessous. Il faut donc **rejouer `php tools/generate-code-reference.php` apres chaque integration**, ce qui est le comportement attendu d'un artefact genere.
 
 ## 1. Vue d'ensemble
 
