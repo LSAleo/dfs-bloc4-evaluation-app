@@ -29,12 +29,19 @@ build_release() {
   sudo systemctl reload apache2
 }
 
+# Smoke test avec attente active : le microservice Next.js met quelques
+# secondes a ecouter apres un restart. On reessaie jusqu'a 10 fois (30 s max).
 smoke_test() {
-  local base="https://${DOMAIN}"
-  curl -fsS "${base}/api/health" | grep -q '"status":"ok"' || return 1
-  curl -fsS -o /dev/null "${base}/"                        || return 1
-  curl -fsS -o /dev/null "${base}/dispatch-dashboard"      || return 1
-  return 0
+  local base="https://${DOMAIN}" i
+  for i in $(seq 1 10); do
+    if curl -fsS "${base}/api/health" | grep -q '"status":"ok"' \
+       && curl -fsS -o /dev/null "${base}/" \
+       && curl -fsS -o /dev/null "${base}/dispatch-dashboard"; then
+      return 0
+    fi
+    echo "   ...services pas encore prets (tentative ${i}/10)"; sleep 3
+  done
+  return 1
 }
 
 # --- Deploiement de la nouvelle version ---
