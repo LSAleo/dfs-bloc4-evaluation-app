@@ -22,8 +22,13 @@ class TicketController extends Controller
         $query = Ticket::query()->with(['site', 'openedBy', 'assignedTo', 'interventions']);
 
         if ($search = $request->string('search')->toString()) {
-            $query->where('title', 'like', "%{$search}%")
-                ->orWhereRaw("reference like '%{$search}%'");
+            // Groupement dans une closure : la recherche titre/reference reste
+            // isolee des autres filtres (ex. priorite), et les valeurs passent
+            // par des bindings parametres (plus d'injection SQL via orWhereRaw).
+            $query->where(function ($q) use ($search): void {
+                $q->where('title', 'like', "%{$search}%")
+                    ->orWhere('reference', 'like', "%{$search}%");
+            });
         }
 
         if ($priority = $request->string('priority')->toString()) {
