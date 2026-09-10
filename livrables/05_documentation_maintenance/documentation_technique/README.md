@@ -2,7 +2,20 @@
 
 Documentation generee a partir du **code source applicatif** (repertoires `app/`, `routes/`, `database/`, `public/`, `microservices/`), hors dependances tierces (`vendor/`, `node_modules/`).
 
-> Regeneration automatique possible : `phpDocumentor` (`phpdoc -d app -t livrables/05_documentation_maintenance/documentation_technique/api`) produit la reference de classes complete a partir des annotations du code.
+Ce dossier contient deux documents complementaires :
+
+| Document | Nature | Production |
+| --- | --- | --- |
+| Le present `README.md` | Vue d'ensemble commentee : architecture, responsabilites, flux | redige a la main |
+| [`reference_classes.md`](reference_classes.md) | **Reference exhaustive** des classes et methodes publiques | **genere** par [`tools/generate-code-reference.php`](../../../tools/generate-code-reference.php) |
+
+**Regeneration** (aucun prerequis, ni `vendor/` ni demarrage de l'application) :
+
+```bash
+php tools/generate-code-reference.php
+```
+
+Le generateur analyse `app/`, `database/seeders/` et `database/factories/` avec le tokenizer de PHP (`token_get_all`), et **exclut les dependances tierces** (`vendor/`, `node_modules/`) conformement a l'attendu. Il extrait namespaces, classes/interfaces/traits/enums, methodes publiques avec signature, et docblocks. Sortie deterministe : deux executions successives produisent un fichier identique, ce qui le rend rejouable dans le pipeline CI. Perimetre couvert a ce jour : **22 fichiers, 22 classes, 31 methodes publiques** — total recoupe avec un comptage independant du code source.
 
 ## 1. Vue d'ensemble
 

@@ -8,7 +8,8 @@ Ensemble documentaire produit pour la reprise de maintenance d'**OpsTrack Field 
 
 | Fichier | Description |
 | --- | --- |
-| [`documentation_technique/`](documentation_technique/README.md) | Documentation technique generee a partir du code source (hors dependances tierces) |
+| [`documentation_technique/README.md`](documentation_technique/README.md) | Vue d'ensemble technique : architecture, responsabilites, flux |
+| [`documentation_technique/reference_classes.md`](documentation_technique/reference_classes.md) | Reference des classes et methodes publiques, **generee** par [`tools/generate-code-reference.php`](../../tools/generate-code-reference.php) a partir du code source, hors dependances tierces |
 | [`documentation_api.md`](documentation_api.md) | Documentation de l'API REST `/api/v1` et du webhook |
 | [`CHANGELOG.md`](CHANGELOG.md) | Journal des modifications apportees pendant l'epreuve |
 | [`SECURITY.md`](SECURITY.md) | Journal des failles de securite et corrections |
