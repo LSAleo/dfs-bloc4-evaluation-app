@@ -164,6 +164,7 @@ function parse_file(string $path): array
             $signature = '';
             $name = '';
             $seenName = false;
+            $anonymous = false;
 
             for ($j = $i + 1; $j < $count; $j++) {
                 $t = $tokens[$j];
@@ -172,6 +173,17 @@ function parse_file(string $path): array
                     if ($t === '{' || $t === ';') {
                         break;
                     }
+
+                    // Une parenthese ouvrante avant tout identifiant signe une
+                    // fonction anonyme : `function ($q) use ($search): void {}`.
+                    // Sans ce garde-fou, le premier T_STRING rencontre est le
+                    // TYPE DE RETOUR (`void`, `array`, ...) et la closure serait
+                    // enregistree comme une methode fantome.
+                    if ($t === '(' && ! $seenName) {
+                        $anonymous = true;
+                        break;
+                    }
+
                     $signature .= $t;
                     continue;
                 }
@@ -191,7 +203,7 @@ function parse_file(string $path): array
             // par exemple le point d'entree du DashboardController.
             $excluded = ['__construct', '__destruct'];
 
-            if ($isPublic && $name !== '' && ! in_array($name, $excluded, true)) {
+            if (! $anonymous && $isPublic && $name !== '' && ! in_array($name, $excluded, true)) {
                 $structures[$currentIdx]['methods'][] = [
                     'name' => $name,
                     'signature' => trim(preg_replace('/\s+/', ' ', $signature) ?? ''),
